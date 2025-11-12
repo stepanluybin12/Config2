@@ -2,10 +2,18 @@
 import configparser
 import os
 import sys
+import json
+import urllib.request
+import urllib.error
 
 
 class ConfigError(Exception):
     """Кастомное исключение для ошибок конфигурации"""
+    pass
+
+
+class DependencyError(Exception):
+    """Кастомное исключение для ошибок получения зависимостей"""
     pass
 
 
@@ -14,24 +22,21 @@ class DependencyVisualizer:
         self.config_path = config_path
         self.config = configparser.ConfigParser()
         self.settings = {}
+        self.dependencies = {}
 
     def load_config(self):
         """Загрузка и валидация конфигурации"""
         try:
-            # Проверка существования файла конфигурации
             if not os.path.exists(self.config_path):
                 raise ConfigError(f"Конфигурационный файл '{self.config_path}' не найден")
 
-            # Чтение конфигурации
             self.config.read(self.config_path, encoding='utf-8')
 
-            # Проверка наличия обязательных секций
             if not self.config.has_section('package'):
                 raise ConfigError("Отсутствует обязательная секция 'package' в конфигурации")
             if not self.config.has_section('repository'):
                 raise ConfigError("Отсутствует обязательная секция 'repository' в конфигурации")
 
-            # Загрузка и валидация всех параметров
             self._load_package_settings()
             self._load_repository_settings()
 
@@ -44,21 +49,18 @@ class DependencyVisualizer:
         """Загрузка и валидация настроек пакета"""
         package_section = self.config['package']
 
-        # Имя пакета
         if 'name' not in package_section:
             raise ConfigError("Отсутствует обязательный параметр 'name' в секции 'package'")
         self.settings['package_name'] = package_section['name'].strip()
         if not self.settings['package_name']:
             raise ConfigError("Имя пакета не может быть пустым")
 
-        # Версия пакета
         if 'version' not in package_section:
             raise ConfigError("Отсутствует обязательный параметр 'version' в секции 'package'")
         self.settings['package_version'] = package_section['version'].strip()
         if not self.settings['package_version']:
             raise ConfigError("Версия пакета не может быть пустой")
 
-        # Имя выходного файла
         if 'output_file' not in package_section:
             raise ConfigError("Отсутствует обязательный параметр 'output_file' в секции 'package'")
         self.settings['output_file'] = package_section['output_file'].strip()
@@ -69,22 +71,56 @@ class DependencyVisualizer:
         """Загрузка и валидация настроек репозитория"""
         repository_section = self.config['repository']
 
-        # URL репозитория или путь к файлу
         if 'url' not in repository_section:
             raise ConfigError("Отсутствует обязательный параметр 'url' в секции 'repository'")
         self.settings['repository_url'] = repository_section['url'].strip()
         if not self.settings['repository_url']:
             raise ConfigError("URL репозитория не может быть пустым")
 
-        # Режим тестового репозитория
-        if 'test_mode' not in repository_section:
-            raise ConfigError("Отсутствует обязательный параметр 'test_mode' в секции 'repository'")
+    def get_dependencies(self):
+        """Получение зависимостей из npm registry"""
+        try:
+            package_name = self.settings['package_name']
+            package_version = self.settings['package_version']
+            registry_url = self.settings['repository_url']
 
-        test_mode_str = repository_section['test_mode'].strip().lower()
-        if test_mode_str not in ('true', 'false', '1', '0', 'yes', 'no'):
-            raise ConfigError("Параметр 'test_mode' должен быть 'true' или 'false'")
+            # Формируем URL для запроса к npm registry
+            url = f"{registry_url}/{package_name}/{package_version}"
 
-        self.settings['test_mode'] = test_mode_str in ('true', '1', 'yes')
+            print(f"Запрос к npm registry: {url}")
+
+            # Выполняем HTTP запрос
+            with urllib.request.urlopen(url) as response:
+                data = json.loads(response.read().decode('utf-8'))
+
+            # Извлекаем зависимости
+            dependencies = data.get('dependencies', {})
+
+            return dependencies
+
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise DependencyError(f"Пакет {package_name}@{package_version} не найден в registry")
+            else:
+                raise DependencyError(f"Ошибка HTTP при запросе к registry: {e.code}")
+        except urllib.error.URLError as e:
+            raise DependencyError(f"Ошибка подключения к registry: {e.reason}")
+        except Exception as e:
+            raise DependencyError(f"Неожиданная ошибка при получении зависимостей: {e}")
+
+    def display_dependencies(self):
+        """Вывод прямых зависимостей (требование этапа 4)"""
+        print("\n=== ПРЯМЫЕ ЗАВИСИМОСТИ ПАКЕТА ===")
+        print(f"Пакет: {self.settings['package_name']}@{self.settings['package_version']}")
+
+        if not self.dependencies:
+            print("Зависимости не найдены")
+            return
+
+        print("\nСписок прямых зависимостей:")
+        for dep_name, dep_version in self.dependencies.items():
+            print(f"  - {dep_name}: {dep_version}")
+        print(f"\nВсего зависимостей: {len(self.dependencies)}")
 
     def display_settings(self):
         """Вывод всех настроек в формате ключ-значение"""
@@ -96,20 +132,24 @@ class DependencyVisualizer:
         print(f"Имя сгенерированного файла с изображением графа: {self.settings['output_file']}")
 
         print("\n--- Параметры репозитория ---")
-        print(f"URL-адрес репозитория или путь к файлу тестового репозитория: {self.settings['repository_url']}")
-        print(f"Режим работы с тестовым репозиторием: {self.settings['test_mode']}")
+        print(f"URL-адрес репозитория: {self.settings['repository_url']}")
         print("\n=============================")
 
     def run(self):
         """Основной метод запуска приложения"""
         try:
             self.load_config()
-
-            # Вывод всех настроек (требование этапа 3)
             self.display_settings()
 
-        except ConfigError as e:
-            print(f"Ошибка конфигурации: {e}")
+            # Получение зависимостей (этап 2)
+            print("\nПолучение информации о зависимостях...")
+            self.dependencies = self.get_dependencies()
+
+            # Вывод зависимостей (требование этапа 4)
+            self.display_dependencies()
+
+        except (ConfigError, DependencyError) as e:
+            print(f"Ошибка: {e}")
             sys.exit(1)
         except Exception as e:
             print(f"Неожиданная ошибка: {e}")
@@ -117,13 +157,10 @@ class DependencyVisualizer:
 
 
 def main():
-
-    # Определяем путь к конфигурационному файлу
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
     else:
-        # Если файл не указан, используем config.ini по умолчанию
-        config_path = 'test_configs/config.ini'
+        config_path = 'config.ini'
 
     visualizer = DependencyVisualizer(config_path)
     visualizer.run()
