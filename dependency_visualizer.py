@@ -32,6 +32,7 @@ class DependencyVisualizer:
         self.dependencies = {}
         self.dependency_graph = {}
         self.cycles_detected = []
+        self.reverse_dependencies = {}
 
     def load_config(self):
         """Загрузка и валидация конфигурации"""
@@ -93,6 +94,13 @@ class DependencyVisualizer:
         else:
             self.settings['test_mode'] = True
 
+        # Режим обратных зависимостей (этап 4)
+        if 'reverse_deps' in repository_section:
+            reverse_str = repository_section['reverse_deps'].strip().lower()
+            self.settings['reverse_deps'] = reverse_str in ('true', '1', 'yes')
+        else:
+            self.settings['reverse_deps'] = False
+
     def load_graph_from_file(self):
         """Загрузка графа из текстового файла"""
         try:
@@ -136,14 +144,24 @@ class DependencyVisualizer:
         except Exception as e:
             raise GraphError(f"Ошибка чтения файла графа: {e}")
 
+    def build_full_dependency_graph(self):
+        """Построение полного графа зависимостей (все пакеты)"""
+        full_graph = {}
+
+        # Копируем исходный граф
+        for package, dependencies in self.dependency_graph.items():
+            full_graph[package] = dependencies.copy()
+
+        return full_graph
+
     def build_dependency_graph_dfs(self, start_package):
-        """Построение графа зависимостей с помощью DFS без рекурсии"""
+        """Построение графа зависимостей с помощью DFS без рекурсии для конкретного пакета"""
         if start_package not in self.dependency_graph:
             return {}, []
 
         stack = [(start_package, [start_package], 0)]  # (current_node, path, depth)
         visited = set()
-        full_graph = {}
+        package_graph = {}
         cycles = []
 
         while stack:
@@ -152,13 +170,13 @@ class DependencyVisualizer:
             if current_node not in visited:
                 visited.add(current_node)
                 # Инициализируем список зависимостей для текущего узла
-                full_graph[current_node] = []
+                package_graph[current_node] = []
 
                 # Получаем зависимости текущего узла из исходного графа
                 if current_node in self.dependency_graph:
                     for dependency in self.dependency_graph[current_node]:
                         # Добавляем зависимость без версии
-                        full_graph[current_node].append(dependency)
+                        package_graph[current_node].append(dependency)
 
                         # Проверка на циклы
                         if dependency in path:
@@ -168,7 +186,48 @@ class DependencyVisualizer:
                             # Добавляем зависимость в стек для дальнейшего обхода
                             stack.append((dependency, path + [dependency], depth + 1))
 
-        return full_graph, cycles
+        return package_graph, cycles
+
+    def build_reverse_dependencies(self):
+        """Построение графа обратных зависимостей"""
+        reverse_graph = {}
+
+        # Инициализируем граф обратных зависимостей для всех пакетов
+        for package in self.dependency_graph:
+            reverse_graph[package] = []
+
+        # Заполняем обратные зависимости
+        for package, dependencies in self.dependency_graph.items():
+            for dep in dependencies:
+                if dep not in reverse_graph:
+                    reverse_graph[dep] = []
+                reverse_graph[dep].append(package)
+
+        return reverse_graph
+
+    def find_reverse_dependencies_dfs(self, target_package):
+        """Поиск обратных зависимостей с помощью DFS для конкретного пакета"""
+        if target_package not in self.reverse_dependencies:
+            return []
+
+        stack = [target_package]
+        visited = set()
+        reverse_deps = []
+
+        while stack:
+            current_node = stack.pop()
+
+            if current_node not in visited:
+                visited.add(current_node)
+
+                # Добавляем пакеты, которые зависят от текущего
+                if current_node in self.reverse_dependencies:
+                    for dependent in self.reverse_dependencies[current_node]:
+                        if dependent not in visited:
+                            reverse_deps.append(dependent)
+                            stack.append(dependent)
+
+        return reverse_deps
 
     def get_dependencies(self):
         """Основной метод получения зависимостей"""
@@ -180,6 +239,10 @@ class DependencyVisualizer:
                 available_packages = list(self.dependency_graph.keys())
                 if available_packages:
                     self.settings['package_name'] = available_packages[0]
+
+            # Строим граф обратных зависимостей
+            self.reverse_dependencies = self.build_reverse_dependencies()
+
             return {}
         else:
             return self.get_dependencies_from_npm()
@@ -192,17 +255,18 @@ class DependencyVisualizer:
         print(f"Тестовый режим: {self.settings['test_mode']}")
         print(f"Версия: {self.settings['package_version']}")
         print(f"Выходной файл: {self.settings['output_file']}")
+        if self.settings.get('reverse_deps', False):
+            print(f"Режим обратных зависимостей: ВКЛЮЧЕН")
         print()
 
     def display_dependency_graph(self):
-        """Вывод графа зависимостей"""
-        print(f"Построение графа зависимостей для: {self.settings['package_name']}")
+        """Вывод полного графа зависимостей"""
+        print(f"ПОЛНЫЙ ГРАФ ЗАВИСИМОСТЕЙ:")
         print()
 
-        start_package = self.settings['package_name']
-        full_graph, cycles = self.build_dependency_graph_dfs(start_package)
+        # Получаем полный граф (все пакеты)
+        full_graph = self.build_full_dependency_graph()
 
-        print("Граф зависимостей:")
         for package in sorted(full_graph.keys()):
             dependencies = full_graph[package]
             print(f"{package} -> {dependencies}")
@@ -214,13 +278,64 @@ class DependencyVisualizer:
         print(f"Всего пакетов: {total_packages}")
         print(f"Всего зависимостей: {total_dependencies}")
 
+    def display_package_dependencies(self):
+        """Вывод зависимостей для конкретного пакета"""
+        print(f"\nЗАВИСИМОСТИ ДЛЯ ПАКЕТА {self.settings['package_name']}:")
+        print()
+
+        start_package = self.settings['package_name']
+        package_graph, cycles = self.build_dependency_graph_dfs(start_package)
+
+        for package in sorted(package_graph.keys()):
+            dependencies = package_graph[package]
+            print(f"{package} -> {dependencies}")
+
+        print(f"\nПакетов в подграфе: {len(package_graph)}")
+
+    def display_reverse_dependencies(self):
+        """Вывод обратных зависимостей (этап 4)"""
+        print("\n" + "=" * 60)
+        print("ЭТАП 4: ОБРАТНЫЕ ЗАВИСИМОСТИ")
+        print("=" * 60)
+
+        target_package = self.settings['package_name']
+
+        print(f"Поиск обратных зависимостей для пакета: {target_package}")
+        print("(пакеты, которые зависят от данного пакета)")
+        print()
+
+        if target_package not in self.reverse_dependencies:
+            print(f"Пакет '{target_package}' не найден в графе")
+            return
+
+        reverse_deps = self.find_reverse_dependencies_dfs(target_package)
+
+        if reverse_deps:
+            print("Обратные зависимости:")
+            for dep in sorted(reverse_deps):
+                print(f"  - {dep}")
+            print(f"\nВсего обратных зависимостей: {len(reverse_deps)}")
+        else:
+            print("Обратные зависимости не найдены")
+            print("(никто не зависит от данного пакета)")
+
     def run(self):
         """Основной метод запуска приложения"""
         try:
             self.load_config()
             self.display_settings()
             self.dependencies = self.get_dependencies()
-            self.display_dependency_graph()
+
+            if self.graph_file_path:
+                # Выводим полный граф
+                self.display_dependency_graph()
+
+                # Выводим зависимости для конкретного пакета
+                self.display_package_dependencies()
+
+                # Вывод обратных зависимостей если включен режим (этап 4)
+                if self.settings.get('reverse_deps', False):
+                    self.display_reverse_dependencies()
 
         except (ConfigError, DependencyError, GraphError) as e:
             print(f"Ошибка: {e}")
