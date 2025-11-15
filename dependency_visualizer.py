@@ -5,6 +5,7 @@ import sys
 import json
 import urllib.request
 import urllib.error
+from collections import deque
 
 
 class ConfigError(Exception):
@@ -17,12 +18,20 @@ class DependencyError(Exception):
     pass
 
 
+class GraphError(Exception):
+    """Кастомное исключение для ошибок работы с графом"""
+    pass
+
+
 class DependencyVisualizer:
-    def __init__(self, config_path):
+    def __init__(self, config_path, graph_file_path=None):
         self.config_path = config_path
+        self.graph_file_path = graph_file_path
         self.config = configparser.ConfigParser()
         self.settings = {}
         self.dependencies = {}
+        self.dependency_graph = {}
+        self.cycles_detected = []
 
     def load_config(self):
         """Загрузка и валидация конфигурации"""
@@ -77,78 +86,143 @@ class DependencyVisualizer:
         if not self.settings['repository_url']:
             raise ConfigError("URL репозитория не может быть пустым")
 
-    def get_dependencies(self):
-        """Получение зависимостей из npm registry"""
+        # Тестовый режим
+        if 'test_mode' in repository_section:
+            test_mode_str = repository_section['test_mode'].strip().lower()
+            self.settings['test_mode'] = test_mode_str in ('true', '1', 'yes')
+        else:
+            self.settings['test_mode'] = True
+
+    def load_graph_from_file(self):
+        """Загрузка графа из текстового файла"""
         try:
-            package_name = self.settings['package_name']
-            package_version = self.settings['package_version']
-            registry_url = self.settings['repository_url']
+            if not os.path.exists(self.graph_file_path):
+                raise GraphError(f"Файл графа '{self.graph_file_path}' не найден")
 
-            # Формируем URL для запроса к npm registry
-            url = f"{registry_url}/{package_name}/{package_version}"
+            graph_data = {}
 
-            print(f"Запрос к npm registry: {url}")
+            with open(self.graph_file_path, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
 
-            # Выполняем HTTP запрос
-            with urllib.request.urlopen(url) as response:
-                data = json.loads(response.read().decode('utf-8'))
+                    if ':' not in line:
+                        raise GraphError(f"Неверный формат в строке {line_num}: {line}")
 
-            # Извлекаем зависимости
-            dependencies = data.get('dependencies', {})
+                    package, deps_str = line.split(':', 1)
+                    package = package.strip()
 
-            return dependencies
+                    # Проверяем что пакет состоит из больших латинских букв
+                    if not package.isupper() or not package.isalpha():
+                        raise GraphError(f"Имя пакета '{package}' должно состоять только из больших латинских букв")
 
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                raise DependencyError(f"Пакет {package_name}@{package_version} не найден в registry")
-            else:
-                raise DependencyError(f"Ошибка HTTP при запросе к registry: {e.code}")
-        except urllib.error.URLError as e:
-            raise DependencyError(f"Ошибка подключения к registry: {e.reason}")
+                    # Обрабатываем зависимости
+                    dependencies = []
+                    if deps_str.strip():
+                        for dep in deps_str.split(','):
+                            dep = dep.strip()
+                            if dep:
+                                # Проверяем что зависимость состоит из больших латинских букв
+                                if not dep.isupper() or not dep.isalpha():
+                                    raise GraphError(
+                                        f"Имя зависимости '{dep}' должно состоять только из больших латинских букв")
+                                dependencies.append(dep)
+
+                    graph_data[package] = dependencies
+
+            return graph_data
+
         except Exception as e:
-            raise DependencyError(f"Неожиданная ошибка при получении зависимостей: {e}")
+            raise GraphError(f"Ошибка чтения файла графа: {e}")
 
-    def display_dependencies(self):
-        """Вывод прямых зависимостей (требование этапа 4)"""
-        print("\n=== ПРЯМЫЕ ЗАВИСИМОСТИ ПАКЕТА ===")
-        print(f"Пакет: {self.settings['package_name']}@{self.settings['package_version']}")
+    def build_dependency_graph_dfs(self, start_package):
+        """Построение графа зависимостей с помощью DFS без рекурсии"""
+        if start_package not in self.dependency_graph:
+            return {}, []
 
-        if not self.dependencies:
-            print("Зависимости не найдены")
-            return
+        stack = [(start_package, [start_package], 0)]  # (current_node, path, depth)
+        visited = set()
+        full_graph = {}
+        cycles = []
 
-        print("\nСписок прямых зависимостей:")
-        for dep_name, dep_version in self.dependencies.items():
-            print(f"  - {dep_name}: {dep_version}")
-        print(f"\nВсего зависимостей: {len(self.dependencies)}")
+        while stack:
+            current_node, path, depth = stack.pop()
+
+            if current_node not in visited:
+                visited.add(current_node)
+                # Инициализируем список зависимостей для текущего узла
+                full_graph[current_node] = []
+
+                # Получаем зависимости текущего узла из исходного графа
+                if current_node in self.dependency_graph:
+                    for dependency in self.dependency_graph[current_node]:
+                        # Добавляем зависимость без версии
+                        full_graph[current_node].append(dependency)
+
+                        # Проверка на циклы
+                        if dependency in path:
+                            cycle = path[path.index(dependency):] + [dependency]
+                            cycles.append(cycle)
+                        elif dependency not in visited:
+                            # Добавляем зависимость в стек для дальнейшего обхода
+                            stack.append((dependency, path + [dependency], depth + 1))
+
+        return full_graph, cycles
+
+    def get_dependencies(self):
+        """Основной метод получения зависимостей"""
+        if self.graph_file_path:
+            self.dependency_graph = self.load_graph_from_file()
+
+            # Автоматически используем первый пакет из графа если указанный не найден
+            if self.settings['package_name'] not in self.dependency_graph:
+                available_packages = list(self.dependency_graph.keys())
+                if available_packages:
+                    self.settings['package_name'] = available_packages[0]
+            return {}
+        else:
+            return self.get_dependencies_from_npm()
 
     def display_settings(self):
-        """Вывод всех настроек в формате ключ-значение"""
-        print("=== НАСТРОЙКИ ПРИЛОЖЕНИЯ ===")
-        print(f"Конфигурационный файл: {self.config_path}")
-        print("\n--- Параметры пакета ---")
-        print(f"Имя анализируемого пакета: {self.settings['package_name']}")
-        print(f"Версия пакета: {self.settings['package_version']}")
-        print(f"Имя сгенерированного файла с изображением графа: {self.settings['output_file']}")
+        """Вывод параметров конфигурации"""
+        print("Параметры конфигурации:")
+        print(f"Пакет: {self.settings['package_name']}")
+        print(f"Репозиторий: {self.graph_file_path if self.graph_file_path else self.settings['repository_url']}")
+        print(f"Тестовый режим: {self.settings['test_mode']}")
+        print(f"Версия: {self.settings['package_version']}")
+        print(f"Выходной файл: {self.settings['output_file']}")
+        print()
 
-        print("\n--- Параметры репозитория ---")
-        print(f"URL-адрес репозитория: {self.settings['repository_url']}")
-        print("\n=============================")
+    def display_dependency_graph(self):
+        """Вывод графа зависимостей"""
+        print(f"Построение графа зависимостей для: {self.settings['package_name']}")
+        print()
+
+        start_package = self.settings['package_name']
+        full_graph, cycles = self.build_dependency_graph_dfs(start_package)
+
+        print("Граф зависимостей:")
+        for package in sorted(full_graph.keys()):
+            dependencies = full_graph[package]
+            print(f"{package} -> {dependencies}")
+
+        print()
+        print("Статистика:")
+        total_packages = len(full_graph)
+        total_dependencies = sum(len(deps) for deps in full_graph.values())
+        print(f"Всего пакетов: {total_packages}")
+        print(f"Всего зависимостей: {total_dependencies}")
 
     def run(self):
         """Основной метод запуска приложения"""
         try:
             self.load_config()
             self.display_settings()
-
-            # Получение зависимостей (этап 2)
-            print("\nПолучение информации о зависимостях...")
             self.dependencies = self.get_dependencies()
+            self.display_dependency_graph()
 
-            # Вывод зависимостей (требование этапа 4)
-            self.display_dependencies()
-
-        except (ConfigError, DependencyError) as e:
+        except (ConfigError, DependencyError, GraphError) as e:
             print(f"Ошибка: {e}")
             sys.exit(1)
         except Exception as e:
@@ -157,12 +231,17 @@ class DependencyVisualizer:
 
 
 def main():
-    if len(sys.argv) > 1:
-        config_path = sys.argv[1]
-    else:
-        config_path = 'config.ini'
+    # Обрабатываем аргументы командной строки
+    config_path = 'config.ini'
+    graph_file_path = None
 
-    visualizer = DependencyVisualizer(config_path)
+    for arg in sys.argv[1:]:
+        if arg.endswith('.ini'):
+            config_path = arg
+        elif arg.endswith('.txt'):
+            graph_file_path = arg
+
+    visualizer = DependencyVisualizer(config_path, graph_file_path)
     visualizer.run()
 
 
