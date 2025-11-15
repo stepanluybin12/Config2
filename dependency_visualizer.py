@@ -5,6 +5,7 @@ import sys
 import json
 import urllib.request
 import urllib.error
+import subprocess
 from collections import deque
 
 
@@ -20,6 +21,11 @@ class DependencyError(Exception):
 
 class GraphError(Exception):
     """Кастомное исключение для ошибок работы с графом"""
+    pass
+
+
+class VisualizationError(Exception):
+    """Кастомное исключение для ошибок визуализации"""
     pass
 
 
@@ -100,6 +106,13 @@ class DependencyVisualizer:
             self.settings['reverse_deps'] = reverse_str in ('true', '1', 'yes')
         else:
             self.settings['reverse_deps'] = False
+
+        # Визуализация (этап 5)
+        if 'visualization' in repository_section:
+            viz_str = repository_section['visualization'].strip().lower()
+            self.settings['visualization'] = viz_str in ('true', '1', 'yes')
+        else:
+            self.settings['visualization'] = False
 
     def load_graph_from_file(self):
         """Загрузка графа из текстового файла"""
@@ -229,6 +242,72 @@ class DependencyVisualizer:
 
         return reverse_deps
 
+    def generate_mermaid_diagram(self, graph):
+        """Генерация Mermaid диаграммы из графа"""
+        mermaid_code = "graph TD\n"
+
+        # Собираем все узлы и связи
+        connections = set()
+
+        for package, dependencies in graph.items():
+            if dependencies:
+                for dep in dependencies:
+                    connection = f"    {package} --> {dep}"
+                    connections.add(connection)
+
+        # Добавляем связи в код
+        for connection in sorted(connections):
+            mermaid_code += connection + "\n"
+
+        # Стили для корневого пакета
+        root_package = self.settings['package_name']
+        mermaid_code += f"    style {root_package} fill:#f9f,stroke:#333,stroke-width:2px"
+
+        return mermaid_code
+
+    def visualize_dependencies(self):
+        """Визуализация графа зависимостей (этап 5)"""
+        print("\n" + "=" * 60)
+        print("ЭТАП 5: ВИЗУАЛИЗАЦИЯ ГРАФА ЗАВИСИМОСТЕЙ")
+        print("=" * 60)
+
+        # Получаем полный граф для визуализации
+        full_graph = self.build_full_dependency_graph()
+
+        # Генерируем Mermaid код
+        mermaid_code = self.generate_mermaid_diagram(full_graph)
+
+        print("Mermaid код:")
+        print(mermaid_code)
+
+    def get_dependencies_from_npm(self):
+        """Получение зависимостей из npm registry"""
+        try:
+            package_name = self.settings['package_name']
+            package_version = self.settings['package_version']
+            registry_url = self.settings['repository_url']
+
+            url = f"{registry_url}/{package_name}/{package_version}"
+
+            print(f"Запрос к npm registry: {url}")
+
+            with urllib.request.urlopen(url) as response:
+                data = json.loads(response.read().decode('utf-8'))
+
+            dependencies = data.get('dependencies', {})
+
+            return dependencies
+
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise DependencyError(f"Пакет {package_name}@{package_version} не найден в registry")
+            else:
+                raise DependencyError(f"Ошибка HTTP при запросе к registry: {e.code}")
+        except urllib.error.URLError as e:
+            raise DependencyError(f"Ошибка подключения к registry: {e.reason}")
+        except Exception as e:
+            raise DependencyError(f"Неожиданная ошибка при получении зависимостей: {e}")
+
     def get_dependencies(self):
         """Основной метод получения зависимостей"""
         if self.graph_file_path:
@@ -257,6 +336,8 @@ class DependencyVisualizer:
         print(f"Выходной файл: {self.settings['output_file']}")
         if self.settings.get('reverse_deps', False):
             print(f"Режим обратных зависимостей: ВКЛЮЧЕН")
+        if self.settings.get('visualization', False):
+            print(f"Визуализация: ВКЛЮЧЕНА")
         print()
 
     def display_dependency_graph(self):
@@ -337,7 +418,11 @@ class DependencyVisualizer:
                 if self.settings.get('reverse_deps', False):
                     self.display_reverse_dependencies()
 
-        except (ConfigError, DependencyError, GraphError) as e:
+                # Визуализация если включена (этап 5)
+                if self.settings.get('visualization', False):
+                    self.visualize_dependencies()
+
+        except (ConfigError, DependencyError, GraphError, VisualizationError) as e:
             print(f"Ошибка: {e}")
             sys.exit(1)
         except Exception as e:

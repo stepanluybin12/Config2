@@ -5,12 +5,12 @@ echo === ТЕСТИРОВАНИЕ ЭТАПА 4 - ОБРАТНЫЕ ЗАВИСИМ
 echo.
 
 echo 1. Простой граф - обратные зависимости для D:
-python dependency_visualizer.py test_configs/config4.ini test_configs/graph.txt
+python dependency_visualizer.py test_configs/Config4.ini test_configs/graph.txt
 echo.
 pause
 
 echo 2. Граф с циклами - обратные зависимости:
-python dependency_visualizer.py test_configs/config4.ini test_configs/graph_cycle.txt
+python dependency_visualizer.py test_configs/Config4.ini test_configs/graph_cycle.txt
 echo.
 pause
 
